@@ -11,53 +11,101 @@
 DHT dht(DHTPIN, DHTTYPE);
 float dht_temp;
 float dht_hum;
-float dht_pres;
+bool dht_success;
 
 // DS18B20 settings
 OneWire oneWire(ONE_WIRE_BUS);
 DallasTemperature DS18B20(&oneWire);
-float temp_ds18b20;
+float ds18b20_temp;
+bool ds18b20_success;
 
 // variables for delayed readings
 uint16_t const INTERVAL = 1000;
-uint32_t old_time = 0;
+uint32_t last_time = 0;
 
-void setup(void) {
+void setup(void)
+{
   Serial.begin(9600);
   DS18B20.begin();
   dht.begin();
 }
 
-void loop(void) {
-  // Delay without delay function
-  if (millis() - old_time < INTERVAL) {
+// main loop
+void loop(void)
+{
+  // Delay
+  if (millis() - last_time < INTERVAL)
+  {
     return;
   }
-  // reset old_time for delayed readings
-  old_time = millis();
+  last_time = millis();
 
-  // get sensor readings
-  DS18B20.requestTemperatures();
-  temp_ds18b20 = DS18B20.getTempCByIndex(0);
+  // read sensors
+  readDS18B20();
+  readDHT22();
 
-  // Check if reading was successful
-  if (temp_ds18b20 != DEVICE_DISCONNECTED_C) {
-    Serial.print(temp_ds18b20);
-  } else {
-    Serial.print("Error reading DS18B20");
+  // print to serial port
+  sendToSerial();
+}
+
+void sendToSerial()
+{
+  /*
+  Serial string syntax:
+  <DS18B20 Temp>;<DHT Temp>;<DHT Hum>;<CR>
+  */
+
+  // DS18B20
+  if (ds18b20_success)
+  {
+    Serial.print(ds18b20_temp);
+    Serial.print(";");
+  }
+  else
+  {
+    Serial.print("ErrDS18");
+    Serial.print(";");
   }
 
+  // DHT22
+  if (dht_success)
+  {
+    Serial.print(dht_temp);
+    Serial.print(";");
+    Serial.print(dht_hum);
+    Serial.print(";\n");
+  }
+  else
+  {
+    Serial.print("ErrDHT");
+    Serial.print(";");
+    Serial.print("ErrDHT");
+    Serial.print(";\n");
+  }
+}
+
+void readDHT22()
+{
+  dht_success = true;
   dht_hum = dht.readHumidity();
   dht_temp = dht.readTemperature();
-  // Check if any reads from DHT failed and exit early (to try again).
-  if (isnan(dht_hum) || isnan(dht_temp)) {
-    Serial.println("Failed to read from DHT sensor!");
-    return;
+
+  // Check if reading was successful
+  if (isnan(dht_hum) || isnan(dht_temp))
+  {
+    dht_success = false;
   }
-  Serial.print("Humidity: ");
-  Serial.print(dht_hum);
-  Serial.print(" %\t");
-  Serial.print("Temperature: ");
-  Serial.print(dht_temp);
-  Serial.println(" *C ");
+}
+
+void readDS18B20()
+{
+  ds18b20_success = true;
+  DS18B20.requestTemperatures();
+  ds18b20_temp = DS18B20.getTempCByIndex(0);
+
+  // Check if reading was successful
+  if (ds18b20_temp == DEVICE_DISCONNECTED_C)
+  {
+    ds18b20_success = false;
+  }
 }
