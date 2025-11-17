@@ -1,5 +1,6 @@
 #include <OneWire.h>
 #include <DallasTemperature.h>
+#include "PID_v1.h"
 
 // --- Pin Definitionen ---
 const int oneWirePin = 7;
@@ -10,18 +11,27 @@ OneWire oneWire(oneWirePin);
 DallasTemperature sensors(&oneWire);
 const int EXPECTED_SENSORS = 2; // Erwartete Anzahl Sensoren
 
+// --- Regelungsvariablen ---
+double sollTemperatur = 20.0; // Soll-Wert für die Regelung
+double istTemperatur = 0.0;   // Ist-Wert von Sensor 0
+double leistung = 0.0;        // Ausgangsleistung für SSR (0-100)
+const float SICHERHEITS_TEMP_MAX = 60.0; // Maximale Temperatur für Sensor 1
+
+// --- PID Regelung ---
+double Kp=10, Ki=0.1, Kd=25;
+PID pid(&istTemperatur, &leistung, &sollTemperatur, Kp, Ki, Kd, DIRECT);
+
 // --- SSR Variablen ---
 const unsigned long zyklusDauer = 2000; // ms
 unsigned long letzterWechselZeitpunktSSR = 0;
-int leistung = 0; // 0-100 %
 unsigned long einschaltZeitSSR = 0; // ms
 
 // --- DS18B20 Variablen ---
 unsigned long letzteAnforderungZeitDS18B20 = 0; // Zeit der letzten Anforderung
 const unsigned long MIN_READ_INTERVAL_DS18B20 = 1000; // Mindestzeit zwischen Lesebeginn (Anforderung)
 const int CONVERSION_TIME_DS18B20 = 750; // ms (für 12-bit)
-float temperature1 = DEVICE_DISCONNECTED_C; // Initialisieren mit Fehlerwert
-float temperature2 = DEVICE_DISCONNECTED_C; // Initialisieren mit Fehlerwert
+float temperature1 = DEVICE_DISCONNECTED_C; // Regelungssensor
+float temperature2 = DEVICE_DISCONNECTED_C; // Sicherheitssensor
 bool conversionStartedDS18B20 = false;
 int deviceCount = 0; // Anzahl gefundener Sensoren
 
@@ -30,92 +40,91 @@ void setup() {
   digitalWrite(ssrPin, LOW); // Sicherstellen, dass SSR zu Beginn aus ist
 
   Serial.begin(9600);
-  while (!Serial) { ; } // Warten auf Serielle Verbindung (für bestimmte Arduinos nötig)
+  while (!Serial) { ; } // Warten auf Serielle Verbindung
 
   sensors.begin();
-  deviceCount = sensors.getDeviceCount(); // Einmalige Prüfung der Sensoranzahl
+  deviceCount = sensors.getDeviceCount();
   Serial.print("Anzahl DS18B20 Sensoren gefunden: ");
   Serial.println(deviceCount);
 
   if (deviceCount < EXPECTED_SENSORS) {
     Serial.println("FEHLER: Nicht alle erwarteten Sensoren gefunden! Verkabelung prüfen!");
-    // Optional: Programm anhalten oder in einen sicheren Zustand gehen
-    // while(true);
   } else {
      Serial.println("Sensoren initialisiert.");
   }
 
-  sensors.setWaitForConversion(false); // Nicht-blockierende Abfragen aktivieren
+  sensors.setWaitForConversion(false);
 
-  Serial.println("Bereit für die Eingabe von Leistungswerten (0-100):");
+  // PID Regler initialisieren
+  pid.SetMode(AUTOMATIC);
+  pid.SetOutputLimits(0, 100); // Leistung in %
+  pid.SetSampleTime(1000);     // PID alle 1000ms berechnen
+
+  Serial.println("Temperaturregelung gestartet.");
+  Serial.println("Senden Sie 'S<temperatur>' um den Sollwert zu ändern (z.B. S25.5).");
 }
 
 void loop() {
   unsigned long currentTime = millis();
 
-  // --- Serielle Eingabe für SSR Leistung ---
+  // --- Serielle Eingabe für Soll-Temperatur ---
   if (Serial.available() > 0) {
     String eingabeString = Serial.readStringUntil('\n');
-    int eingabeWert = eingabeString.toInt();
-
-    if (eingabeWert >= 0 && eingabeWert <= 100) {
-      leistung = eingabeWert;
-      einschaltZeitSSR = (leistung * zyklusDauer) / 100; // Berechnung mit unsigned long für Genauigkeit
-      Serial.print("Eingestellte Leistung: ");
-      Serial.print(leistung);
-      Serial.println("%");
-    } else {
-      Serial.println("Ungültiger Leistungswert (0-100).");
+    if (eingabeString.startsWith("S")) {
+      float neuerSollwert = eingabeString.substring(1).toFloat();
+      if (neuerSollwert > 0 && neuerSollwert < 100) { // Plausibilitätscheck
+        sollTemperatur = neuerSollwert;
+        Serial.print("Neuer Sollwert: ");
+        Serial.println(sollTemperatur);
+      } else {
+        Serial.println("Ungültiger Sollwert.");
+      }
     }
   }
 
   // --- Temperaturmessung DS18B20 (Nicht-blockierend) ---
-  // 1. Prüfen, ob neue Messung angefordert werden soll
   if (!conversionStartedDS18B20 && (currentTime - letzteAnforderungZeitDS18B20 >= MIN_READ_INTERVAL_DS18B20)) {
-    if (deviceCount > 0) { // Nur anfordern, wenn Sensoren beim Start gefunden wurden
-        if (sensors.requestTemperatures()) { // Befehl an *alle* Sensoren
-            letzteAnforderungZeitDS18B20 = currentTime; // Zeitpunkt der Anforderung merken
+    if (deviceCount > 0) {
+        if (sensors.requestTemperatures()) {
+            letzteAnforderungZeitDS18B20 = currentTime;
             conversionStartedDS18B20 = true;
         } else {
             Serial.println("FEHLER beim Anfordern der Temperaturen!");
         }
     } else {
-         // Keine Sensoren vorhanden, nichts anfordern
-         // Serial.println("Keine Sensoren zum Anfordern vorhanden."); // Debug-Ausgabe ggf.
-         letzteAnforderungZeitDS18B20 = currentTime; // Verhindert ständiges Prüfen, wenn keine Sensoren da sind
+         letzteAnforderungZeitDS18B20 = currentTime;
     }
   }
 
-  // 2. Prüfen, ob Konvertierung abgeschlossen ist und gelesen werden kann
   if (conversionStartedDS18B20 && (currentTime - letzteAnforderungZeitDS18B20 >= CONVERSION_TIME_DS18B20)) {
-    Serial.print(currentTime);
-    Serial.print(" ms; Lese Temperaturen: ");
-
-    if (deviceCount > 0) { // Lese nur, wenn Sensoren erwartet werden
+    if (deviceCount > 0) {
         temperature1 = sensors.getTempCByIndex(0);
-        Serial.print(" T1=");
-        if (temperature1 == DEVICE_DISCONNECTED_C) {
-            Serial.print("Fehler!");
-        } else {
-            Serial.print(temperature1);
-            Serial.print("C");
+        if (temperature1 != DEVICE_DISCONNECTED_C) {
+            istTemperatur = temperature1; // Update für PID-Regler
         }
     }
-
-    if (deviceCount > 1) { // Lese zweiten Sensor nur, wenn erwartet
+    if (deviceCount > 1) {
         temperature2 = sensors.getTempCByIndex(1);
-         Serial.print(" T2=");
-        if (temperature2 == DEVICE_DISCONNECTED_C) {
-            Serial.print("Fehler!");
-        } else {
-            Serial.print(temperature2);
-            Serial.print("C");
-        }
     }
-    Serial.println();
-    conversionStartedDS18B20 = false; // Flag zurücksetzen, Konvertierung abgeschlossen
+    conversionStartedDS18B20 = false;
   }
 
+  // --- Sicherheitsabschaltung ---
+  if (temperature2 > SICHERHEITS_TEMP_MAX) {
+    leistung = 0; // Heizung sofort ausschalten
+    Serial.println("!!! SICHERHEITSABSCHALTUNG: Temperatur an Heizmatte zu hoch !!!");
+  } else {
+    // --- PID Regelung ---
+    // Nur regeln, wenn der Sensor gültige Werte liefert
+    if (temperature1 != DEVICE_DISCONNECTED_C) {
+      pid.Compute();
+    } else {
+      leistung = 0; // Bei Sensorfehler sicherheitshalber ausschalten
+    }
+  }
+
+  // Berechne die Einschaltdauer basierend auf der PID-Ausgabe
+  einschaltZeitSSR = (leistung * zyklusDauer) / 100.0;
 
   // --- SSR Steuerung (Zeitproportional) ---
   if (leistung <= 0) {
@@ -123,22 +132,36 @@ void loop() {
   } else if (leistung >= 100) {
     digitalWrite(ssrPin, HIGH);
   } else {
-    // Zeitproportionale Steuerung für Werte zwischen 0 und 100
     if (currentTime - letzterWechselZeitpunktSSR >= zyklusDauer) {
-      // Starte einen neuen Zyklus
-      letzterWechselZeitpunktSSR += zyklusDauer; // Merke den Startzeitpunkt des Zyklus
+      letzterWechselZeitpunktSSR += zyklusDauer;
       if (einschaltZeitSSR > 0) {
-        digitalWrite(ssrPin, HIGH);             // Schalte zu Beginn des Zyklus ein
+        digitalWrite(ssrPin, HIGH);
       }
-      // Serial.print(currentTime); Serial.println(" ms; SSR Zyklus Start: EIN"); // Debug
     } else if (currentTime - letzterWechselZeitpunktSSR >= einschaltZeitSSR) {
-      // Wenn die Einschaltdauer abgelaufen ist, ausschalten
-      // Prüfe zusätzlich, ob es überhaupt an war, um unnötiges Schreiben zu vermeiden (optional aber gut)
       if (digitalRead(ssrPin) == HIGH) {
           digitalWrite(ssrPin, LOW);
-          // Serial.print(currentTime); Serial.println(" ms; SSR Zyklus: AUS"); // Debug
       }
     }
-    // Ansonsten (zwischen HIGH und Ablauf einschaltZeitSSR) bleibt der Zustand HIGH
+  }
+
+  // --- Serielle Ausgabe für Monitoring ---
+  // (Wird nur alle 2 Sekunden ausgegeben, um die Lesbarkeit zu verbessern)
+  static unsigned long letzteAusgabeZeit = 0;
+  if (currentTime - letzteAusgabeZeit >= 2000) {
+    letzteAusgabeZeit = currentTime;
+    Serial.print("Soll: "); Serial.print(sollTemperatur);
+    Serial.print(" C, Ist: ");
+    if (temperature1 == DEVICE_DISCONNECTED_C) {
+      Serial.print("Fehler!");
+    } else {
+      Serial.print(istTemperatur); Serial.print(" C");
+    }
+    Serial.print(", T_sicher: ");
+    if (temperature2 == DEVICE_DISCONNECTED_C) {
+      Serial.print("Fehler!");
+    } else {
+      Serial.print(temperature2); Serial.print(" C");
+    }
+    Serial.print(", Leistung: "); Serial.print(leistung); Serial.println(" %");
   }
 }
