@@ -126,8 +126,10 @@ void loop() {
     // Zeitproportionale Steuerung für Werte zwischen 0 und 100
     if (currentTime - letzterWechselZeitpunktSSR >= zyklusDauer) {
       // Starte einen neuen Zyklus
-      letzterWechselZeitpunktSSR = currentTime; // Merke den Startzeitpunkt des Zyklus
-      digitalWrite(ssrPin, HIGH);             // Schalte zu Beginn des Zyklus ein
+      letzterWechselZeitpunktSSR += zyklusDauer; // Merke den Startzeitpunkt des Zyklus
+      if (einschaltZeitSSR > 0) {
+        digitalWrite(ssrPin, HIGH);             // Schalte zu Beginn des Zyklus ein
+      }
       // Serial.print(currentTime); Serial.println(" ms; SSR Zyklus Start: EIN"); // Debug
     } else if (currentTime - letzterWechselZeitpunktSSR >= einschaltZeitSSR) {
       // Wenn die Einschaltdauer abgelaufen ist, ausschalten
